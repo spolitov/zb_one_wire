@@ -1,4 +1,5 @@
 .idea
+sdkconfig.old
 build/
 cmake-build-debug/
 managed_components/

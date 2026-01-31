@@ -3587,6 +3587,13 @@ CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
 
 #
+# OneWire
+#
+# default:
+CONFIG_ONEWIRE_CRC8_TABLE=y
+# end of OneWire
+
+#
 # Zigbee
 #
 CONFIG_ZB_ENABLED=y
