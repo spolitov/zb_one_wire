@@ -391,6 +391,9 @@ static void setup_ep_temperature(esp_zb_ep_list_t* dev_ep_list, nvs_handle_t nvs
 
 static esp_err_t one_wire_rescan() {
   LOGI("Rescan");
+  onewire_power(ONE_WIRE_GPIO);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  onewire_depower(ONE_WIRE_GPIO);
   onewire_addr_t old_addr_list[APP_MAX_TEMP_SENSORS];
   memcpy(old_addr_list, ow_addr_list, sizeof(old_addr_list));
   onewire_addr_t new_addr_list[APP_MAX_TEMP_SENSORS];
