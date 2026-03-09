@@ -64,7 +64,16 @@ export default {
             deviceId: {ID: 0xF001, type: Zcl.DataType.TEXT, manufacturerCode: 0x1234},
           },
         }),
-        m.deviceEndpoints({"endpoints":{"1":1,"2":2,"3":3,"10":10,"11":11,"12":12,"13":13,"14":14,"15":15,"16":16,"17":17,"18":18,"19":19}}),
+        m.deviceAddCustomCluster("msPressureMeasurement", {
+          ID: 0x0403,
+        }),
+        m.deviceEndpoints({
+          "endpoints":{
+            "1":1,"2":2,"3":3,
+            "10":10,"11":11,"12":12,"13":13,"14":14,"15":15,"16":16,"17":17,"18":18,"19":19,
+            "20":20,"21":21,
+          }
+        }),
         m.onOff({"powerOnBehavior":false,"endpointNames":["2","3"]}),
         m.numeric({
           name: "temperature",
@@ -87,5 +96,16 @@ export default {
         deviceId("17"),
         deviceId("18"),
         deviceId("19"),
+        m.numeric({
+          name: "pressure",
+          cluster: "msPressureMeasurement",
+          attribute: "measuredValue",
+          reporting: {min: 10, max: 300, change: 50},
+          description: "Measured pressure value",
+          unit: "kPa",
+          scale: 10,
+          access: "STATE_GET",
+          endpointNames: ["20","21"],
+        }),
         rescanExtend.rescan()],
 };

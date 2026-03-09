@@ -11,7 +11,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "esp_adc/adc_oneshot.h"
+
 #include "ds18x20.h"
+
+#include "hal/adc_types.h"
 
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -23,6 +27,7 @@
 #include "driver/gpio.h"
 
 #include "app.h"
+
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
 #include "led.h"
@@ -389,11 +394,26 @@ static void setup_ep_temperature(esp_zb_ep_list_t* dev_ep_list, nvs_handle_t nvs
   esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
 }
 
+static void setup_ep_pressure(esp_zb_ep_list_t* dev_ep_list, nvs_handle_t nvs_handle, size_t idx) {
+  esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
+
+  esp_zb_pressure_meas_cluster_cfg_t pressure_cfg = {
+    .measured_value = ESP_ZB_ZCL_VALUE_S16_NaS,
+    .min_value = ESP_ZB_ZCL_VALUE_S16_NaS,
+    .max_value = ESP_ZB_ZCL_VALUE_S16_NaS,
+  };
+
+  esp_zb_attribute_list_t *temp_attr_list =
+    esp_zb_pressure_meas_cluster_create(&pressure_cfg);
+
+  esp_zb_cluster_list_add_pressure_meas_cluster(cl, temp_attr_list, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+  esp_zb_endpoint_config_t ep_cfg = make_ep_config(APP_ENDPOINT_PRESSURE_0 + idx, ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID);
+  esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
+}
+
 static esp_err_t one_wire_rescan() {
   LOGI("Rescan");
-  onewire_power(ONE_WIRE_GPIO);
-  vTaskDelay(pdMS_TO_TICKS(1000));
-  onewire_depower(ONE_WIRE_GPIO);
   onewire_addr_t old_addr_list[APP_MAX_TEMP_SENSORS];
   memcpy(old_addr_list, ow_addr_list, sizeof(old_addr_list));
   onewire_addr_t new_addr_list[APP_MAX_TEMP_SENSORS];
@@ -473,6 +493,33 @@ static esp_err_t one_wire_rescan() {
   return ESP_OK;
 }
 
+static void update_value(uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id, int16_t value) {
+  esp_zb_zcl_status_t status = esp_zb_zcl_set_attribute_val(
+      endpoint,
+      cluster_id,
+      ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+      attr_id,
+      &value,
+      false);
+  if (status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+    LOGW("Failed to set value for endpoint %d to %d: %02x", endpoint, value, status);
+  }
+
+  esp_zb_zcl_report_attr_cmd_t report_attr_cmd;
+  memset(&report_attr_cmd, 0, sizeof(report_attr_cmd));
+  report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
+  report_attr_cmd.attributeID = attr_id;
+  report_attr_cmd.manuf_specific = 0;
+  report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+  report_attr_cmd.clusterID = cluster_id;
+  report_attr_cmd.zcl_basic_cmd.src_endpoint = endpoint;
+
+  esp_err_t err = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+  if (err != ESP_OK) {
+    LOGW("Report in %d failed: %s", endpoint, esp_err_to_name(err));
+  }
+}
+
 static void one_wire_read() {
   onewire_addr_t addr_list[APP_MAX_TEMP_SENSORS];
   size_t indexes[APP_MAX_TEMP_SENSORS];
@@ -495,32 +542,9 @@ static void one_wire_read() {
   }
   if (esp_zb_lock_acquire(portMAX_DELAY)) {
     for (size_t i = 0; i != count; ++i) {
-      uint8_t endpoint = APP_ENDPOINT_TEMPERATURE_0 + indexes[i];
-      int16_t value = result[i] * 100;
-      esp_zb_zcl_status_t status = esp_zb_zcl_set_attribute_val(
-          endpoint,
-          ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-          ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-          &value,
-          false);
-      if (status != ESP_ZB_ZCL_STATUS_SUCCESS) {
-        LOGW("Failed to update temperature at %d to %d: %02x", endpoint, value, status);
-      }
-
-      esp_zb_zcl_report_attr_cmd_t report_attr_cmd;
-      memset(&report_attr_cmd, 0, sizeof(report_attr_cmd));
-      report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
-      report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID;
-      report_attr_cmd.manuf_specific = 0;
-      report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
-      report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT;
-      report_attr_cmd.zcl_basic_cmd.src_endpoint = endpoint;
-
-      esp_err_t err = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
-      if (err != ESP_OK) {
-        LOGW("Report temperature in %d failed: %s", endpoint, esp_err_to_name(err));
-      }
+      update_value(
+          APP_ENDPOINT_TEMPERATURE_0 + indexes[i], ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+          ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, result[i] * 100);
     }
     esp_zb_lock_release();
   }
@@ -559,6 +583,9 @@ static void zigbee_task(void *args) {
   for (size_t i = 0; i != APP_MAX_TEMP_SENSORS; ++i) {
     setup_ep_temperature(dev_ep_list, nvs_handle, i);
   }
+  for (size_t i = 0; i != APP_MAX_PRESSURE_SENSORS; ++i) {
+    setup_ep_pressure(dev_ep_list, nvs_handle, i);
+  }
   nvs_close(nvs_handle);
 
   esp_zb_device_register(dev_ep_list);
@@ -573,6 +600,64 @@ static void zigbee_task(void *args) {
   esp_zb_stack_main_loop();
 }
 
+adc_oneshot_unit_handle_t adc1_handle;
+
+void adc_init() {
+  adc_oneshot_unit_init_cfg_t init_config = {
+    .unit_id = ADC_UNIT_1,
+  };
+
+  adc_oneshot_new_unit(&init_config, &adc1_handle);
+
+  adc_oneshot_chan_cfg_t config = {
+    .atten = ADC_ATTEN_DB_12,
+    .bitwidth = ADC_BITWIDTH_12,
+  };
+
+  for (size_t i = 0; i != APP_MAX_PRESSURE_SENSORS; ++i) {
+    adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_2 + i, &config); // GPIO2
+  }
+}
+
+void adc_task(void* args) {
+  const size_t WARMUP_MEASUREMENTS = 4;
+  const size_t ACTUAL_MEASUREMENTS = 8;
+  for (;;) {
+    int result[APP_MAX_PRESSURE_SENSORS];
+
+    for (size_t i = 0; i != APP_MAX_PRESSURE_SENSORS; ++i) {
+      result[i] = 0;
+      for (size_t j = 0; j != WARMUP_MEASUREMENTS + ACTUAL_MEASUREMENTS; ++j) {
+        int raw;
+        adc_oneshot_read(adc1_handle, ADC_CHANNEL_2 + i, &raw);
+        if (j >= WARMUP_MEASUREMENTS) {
+          result[i] += raw;
+        }
+      }
+      result[i] /= ACTUAL_MEASUREMENTS;
+    }
+
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+      for (size_t i = 0; i != APP_MAX_PRESSURE_SENSORS; ++i) {
+        int16_t value;
+        if (result[i] < 200) {
+          value = ESP_ZB_ZCL_VALUE_S16_NaS;
+        } else if (result[i] <= 230) {
+          value = 0;
+        } else {
+          value = (result[i] - 230) * 25 / 4;
+        }
+        update_value(
+            APP_ENDPOINT_PRESSURE_0 + i, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+            ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, value);
+      }
+      esp_zb_lock_release();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10000));
+  }
+}
+
 void app_main() {
   esp_err_t nvs_rc = nvs_flash_init();
   if (nvs_rc == ESP_ERR_NVS_NO_FREE_PAGES || nvs_rc == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -585,10 +670,13 @@ void app_main() {
 
   led_set_red(0xff);
 
+  adc_init();
+
   ow_event_group = xEventGroupCreate();
 
   xTaskCreate(button_task, "button", 2048, NULL, 4, NULL);
   xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
-  xTaskCreate(one_wire_task, "one_wire", 4096, NULL, 6, NULL);
-  xTaskCreate(zigbee_task, "zigbee", 4096, NULL, 7, NULL);
+  xTaskCreate(adc_task, "adc", 4096, NULL, 6, NULL);
+  xTaskCreate(one_wire_task, "one_wire", 4096, NULL, 7, NULL);
+  xTaskCreate(zigbee_task, "zigbee", 4096, NULL, 8, NULL);
 }
